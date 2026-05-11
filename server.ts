@@ -24,11 +24,22 @@ app.use(session({
   }
 }));
 
-const spotifyApi = new SpotifyWebApi({
-  clientId: process.env.SPOTIFY_CLIENT_ID,
-  clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
-  redirectUri: `${process.env.APP_URL || 'http://localhost:3000'}/auth/callback`
-});
+// Helper to get base URL for redirect URI
+const getBaseUrl = (req: express.Request) => {
+  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
+  const protocol = req.get('x-forwarded-proto') || req.protocol;
+  const host = req.get('host');
+  return `${protocol}://${host}`;
+};
+
+const getSpotifyApi = (req?: express.Request) => {
+  const redirectUri = req ? `${getBaseUrl(req)}/auth/callback` : undefined;
+  return new SpotifyWebApi({
+    clientId: process.env.SPOTIFY_CLIENT_ID,
+    clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
+    redirectUri: redirectUri || `${process.env.APP_URL || 'http://localhost:3000'}/auth/callback`
+  });
+};
 
 const checkSpotifyConfig = () => {
   if (!process.env.SPOTIFY_CLIENT_ID || !process.env.SPOTIFY_CLIENT_SECRET) {
@@ -44,14 +55,16 @@ app.get('/api/auth/url', (req, res) => {
     return res.status(500).json({ error: 'Spotify API credentials are not configured. Please add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to the Secrets panel.' });
   }
   const scopes = ['user-read-private', 'user-read-email', 'playlist-read-private', 'streaming', 'user-modify-playback-state', 'user-read-playback-state'];
-  const authorizeURL = spotifyApi.createAuthorizeURL(scopes, 'pulse-state');
+  const api = getSpotifyApi(req);
+  const authorizeURL = api.createAuthorizeURL(scopes, 'pulse-state');
   res.json({ url: authorizeURL });
 });
 
 app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
   const { code } = req.query;
+  const api = getSpotifyApi(req);
   try {
-    const data = await spotifyApi.authorizationCodeGrant(code as string);
+    const data = await api.authorizationCodeGrant(code as string);
     const accessToken = data.body['access_token'];
     const refreshToken = data.body['refresh_token'];
 
@@ -59,28 +72,66 @@ app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
     // For this demo, we'll send it back to the client via postMessage
     res.send(`
       <html>
+        <head>
+          <style>
+            body { font-family: sans-serif; background: #121212; color: white; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
+            .container { max-width: 400px; padding: 2rem; background: #181818; border-radius: 12px; border: 1px solid #282828; }
+            h1 { color: #1DB954; font-size: 1.5rem; margin-bottom: 1rem; }
+            p { color: #b3b3b3; line-height: 1.6; }
+            .hint { font-size: 0.8rem; background: #282828; padding: 1rem; border-radius: 8px; margin-top: 1rem; text-align: left; }
+          </style>
+        </head>
         <body>
-          <script>
-            if (window.opener) {
-              window.opener.postMessage({ 
-                type: 'OAUTH_AUTH_SUCCESS', 
-                tokens: { 
-                  accessToken: '${accessToken}',
-                  refreshToken: '${refreshToken}'
-                } 
-              }, '*');
-              window.close();
-            } else {
-              window.location.href = '/';
-            }
-          </script>
-          <p>Authentication successful. Access Token received. This window should close automatically.</p>
+          <div class="container">
+            <script>
+              if (window.opener) {
+                window.opener.postMessage({ 
+                  type: 'OAUTH_AUTH_SUCCESS', 
+                  tokens: { 
+                    accessToken: '${accessToken}',
+                    refreshToken: '${refreshToken}'
+                  } 
+                }, '*');
+                setTimeout(() => window.close(), 1000);
+              } else {
+                window.location.href = '/';
+              }
+            </script>
+            <h1>Connected!</h1>
+            <p>Authentication successful. Your mood-aware experience is starting.</p>
+            <p style="font-size: 0.8rem; color: #666;">This window will close automatically.</p>
+          </div>
         </body>
       </html>
     `);
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error in callback:', error);
-    res.status(500).send('Authentication failed');
+    const is403 = error.statusCode === 403;
+    res.status(error.statusCode || 500).send(`
+      <html>
+        <head>
+          <style>
+            body { font-family: sans-serif; background: #121212; color: white; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
+            .container { max-width: 450px; padding: 2rem; background: #181818; border-radius: 12px; border: 1px solid #282828; }
+            h1 { color: #ff5f5f; font-size: 1.5rem; margin-bottom: 1rem; }
+            p { color: #b3b3b3; line-height: 1.6; }
+            .hint { font-size: 0.8rem; background: #282828; padding: 1rem; border-radius: 8px; margin-top: 1rem; text-align: left; color: #1DB954; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>${is403 ? 'Spotify Access Denied' : 'Auth Failed'}</h1>
+            <p>${is403 ? 'Your account is not whitelisted in the developer dashboard for this app.' : 'Something went wrong during Spotify authentication.'}</p>
+            ${is403 ? `
+              <div class="hint">
+                <strong>Fix:</strong> The app owner must add your email to the "User Management" section of their <a href="https://developer.spotify.com/dashboard" style="color: #1DB954;">Spotify Developer Dashboard</a> because the app is in Development Mode.
+              </div>
+            ` : ''}
+            <button onclick="window.close()" style="margin-top: 1.5rem; background: #1DB954; color: black; border: none; padding: 0.8rem 1.5rem; border-radius: full; font-weight: bold; cursor: pointer;">Close Window</button>
+          </div>
+        </body>
+      </html>
+    `);
   }
 });
 
@@ -270,22 +321,37 @@ app.get('/api/recommendations', async (req, res) => {
 });
 
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  const isProd = process.env.NODE_ENV === 'production';
+  console.log(`Starting server in ${process.env.NODE_ENV} mode...`);
+
+  if (!isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.resolve(process.cwd(), 'dist');
+    console.log(`Serving static files from: ${distPath}`);
+    
+    // Serve static files
     app.use(express.static(distPath));
+    
+    // SPA Fallback: ALL routes not handled by API or static files go to index.html
     app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      // Avoid infinite loop if index.html is missing
+      res.sendFile(path.join(distPath, 'index.html'), (err) => {
+        if (err) {
+          console.error('Error sending index.html:', err);
+          res.status(404).send('Application not built. Please run npm run build.');
+        }
+      });
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Base URL: ${process.env.APP_URL || `http://localhost:${PORT}`}`);
   });
 }
 

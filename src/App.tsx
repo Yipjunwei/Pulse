@@ -4,6 +4,9 @@ import { Music, Camera, LogIn, Disc, Info } from 'lucide-react';
 import WebcamFeed from './components/WebcamFeed';
 import SpotifyPlayer from './components/SpotifyPlayer';
 import { EmotionResult, getMoodDescription } from './lib/emotion';
+import { getAiDjMessage } from './lib/aiDj';
+import { playRawAudio } from './lib/audioUtils';
+import { GoogleGenAI, Modality } from "@google/genai";
 import axios from 'axios';
 
 export default function App() {
@@ -14,6 +17,10 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastRequestedMood, setLastRequestedMood] = useState<string | null>(null);
+  
+  // AI DJ States
+  const [aiDjMessage, setAiDjMessage] = useState<string | null>(null);
+  const [isDjTalking, setIsDjTalking] = useState(false);
   
   // New States for refined logic
   const [playedHistory, setPlayedHistory] = useState<string[]>([]);
@@ -77,6 +84,37 @@ export default function App() {
     }
   }, [refreshToken]);
 
+  const playAiDjTts = useCallback(async (message: string) => {
+    try {
+      setIsDjTalking(true);
+      const ai = new GoogleGenAI({ apiKey: (process.env as any).GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: `Say naturally but with a slightly robotic, cool DJ persona: ${message}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Charon' },
+            },
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        await playRawAudio(base64Audio);
+      }
+    } catch (err) {
+      console.error('AI DJ TTS Error:', err);
+    } finally {
+      // Keep message visible for a bit
+      setTimeout(() => {
+        setIsDjTalking(false);
+      }, 5000);
+    }
+  }, []);
+
   const fetchRecommendations = useCallback(async (mood: string, retryWithRefresh = true) => {
     if (!token || isRateLimited) return;
     
@@ -100,6 +138,11 @@ export default function App() {
       if (data.tracks && data.tracks.length > 0) {
         setTracks(data.tracks);
         setLastRequestedMood(mood);
+        
+        // AI DJ Message Generation
+        const message = getAiDjMessage(mood);
+        setAiDjMessage(message);
+        playAiDjTts(message);
         
         // Add new tracks to history (limit to last 50)
         const newIds = data.tracks.map((t: any) => t.id);
@@ -170,14 +213,14 @@ export default function App() {
       if (result.emotion === pendingMood) {
         if (stabilityStartTime) {
           const elapsed = now - stabilityStartTime;
-          // Progress toward 15 seconds
-          const progress = Math.min(100, (elapsed / 15000) * 100);
+          // Progress toward 3 seconds
+          const progress = Math.min(100, (elapsed / 3000) * 100);
           setStabilityProgress(progress);
           
           // Conditions met: 
-          // 1. Dominant for 15s (elapsed >= 15000)
+          // 1. Dominant for 3s (elapsed >= 3000)
           // 2. Last song change > 15s ago (now - lastFetchTimeRef.current >= 15000)
-          if (elapsed >= 15000 && (now - lastFetchTimeRef.current >= 15000)) {
+          if (elapsed >= 3000 && (now - lastFetchTimeRef.current >= 15000)) {
             // Only fetch if it's a different mood or we just haven't updated in a while
             if (result.emotion !== lastRequestedMood) {
               fetchRecommendations(result.emotion);
@@ -308,6 +351,29 @@ export default function App() {
                     </div>
                     <h3 className="text-7xl font-bold tracking-tighter capitalize mb-4 leading-none">{emotion.emotion}</h3>
                     <p className="text-white/60 font-light text-xl italic max-w-sm">{getMoodDescription(emotion.emotion)}</p>
+                    
+                    {/* AI DJ Message Box */}
+                    <AnimatePresence>
+                      {aiDjMessage && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0 }}
+                          className="mt-8 p-4 bg-white/5 border border-white/10 rounded-2xl relative overflow-hidden"
+                        >
+                          <div className="flex items-center gap-2 mb-2">
+                            <div className={`w-1.5 h-1.5 rounded-full ${isDjTalking ? 'bg-[#1DB954] animate-pulse' : 'bg-white/20'}`} />
+                            <span className="text-[10px] font-mono text-white/40 uppercase tracking-widest">AI DJ Persona</span>
+                          </div>
+                          <p className="text-sm font-medium text-white/80 leading-relaxed italic">
+                            "{aiDjMessage}"
+                          </p>
+                          {isDjTalking && (
+                            <div className="absolute bottom-0 left-0 h-0.5 bg-[#1DB954]/40 w-full animate-pulse-slow" />
+                          )}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                   <div className="absolute -right-8 -bottom-8 text-white/5 group-hover:scale-110 transition-transform duration-700 pointer-events-none">
                     <Music className="w-56 h-56" />
@@ -380,6 +446,13 @@ export default function App() {
         }
         .animate-spin-slow {
           animation: slow-spin 8s linear infinite;
+        }
+        @keyframes pulse-slow {
+          0%, 100% { opacity: 0.3; width: 0%; }
+          50% { opacity: 1; width: 100%; }
+        }
+        .animate-pulse-slow {
+          animation: pulse-slow 3s ease-in-out infinite;
         }
       `}</style>
     </div>
