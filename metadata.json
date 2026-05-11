@@ -1,0 +1,6 @@
+{
+  "name": "Pulse",
+  "description": "AI-powered emotion-aware music generator that matches your mood to Spotify playlists using real-time facial detection.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}
